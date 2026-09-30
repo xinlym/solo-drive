@@ -1,0 +1,43 @@
+{
+  "result": "PASS",
+  "image": {
+    "tag": "solo-drive:0.1.0",
+    "id": "sha256:1fe57e65408696f4e8d44a02cce22313d107a56a51d988429f55f63ee642a5dc",
+    "size": "18.1MB",
+    "engine_reported_size_bytes": 5498018
+  },
+  "checks": {
+    "nonroot_readonly": true,
+    "home_and_share_page": true,
+    "private_api": true,
+    "login_and_storage": true,
+    "persistent_session": true,
+    "resume_after_container_recreate": true,
+    "sha256_upload_chunks": true,
+    "eight_parallel_ranges_sha256_match": true,
+    "revoke_and_delete": true,
+    "health": "healthy",
+    "transfer_size_bytes": 16777216,
+    "memory_after_transfer_sample": "19.82MiB / 384MiB / 3.26%",
+    "storage_fields": [
+      "total",
+      "used",
+      "available",
+      "reserve",
+      "upload_available",
+      "files_bytes",
+      "partial_bytes",
+      "pending_bytes"
+    ],
+    "temporary_resources_removed": true,
+    "race_detector": {
+      "result": "PASS",
+      "command": "go test -race -p 1 ./internal/drive",
+      "package": "solodrive/internal/drive",
+      "test_duration_seconds": 25.507,
+      "source_mount": "read_only",
+      "exit_code": 0
+    },
+    "docker_build": true
+  }
+}

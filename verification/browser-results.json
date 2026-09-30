@@ -1,0 +1,21 @@
+{
+  "ok": true,
+  "checks": [
+    "login",
+    "capacity",
+    "20MiB upload pause",
+    "reload and resume",
+    "download SHA256 matches original",
+    "public share",
+    "HTTP Range",
+    "rename retains share",
+    "mobile no horizontal overflow",
+    "revoke",
+    "delete",
+    "no browser errors"
+  ],
+  "idle_rss_kib": 11076,
+  "peak_rss_kib": 14232,
+  "binary_bytes": 12304544,
+  "large_file_note": "100 GiB offset verified by separate sparse-file Go test; real 50–100 GB transfer not performed"
+}

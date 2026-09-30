@@ -1,0 +1,11 @@
+{$SOLODRIVE_DOMAIN} {
+    reverse_proxy drive:8091 {
+        header_up X-Forwarded-Proto https
+        transport http {
+            dial_timeout 5s
+            response_header_timeout 1h
+            read_timeout 1h
+            write_timeout 1h
+        }
+    }
+}

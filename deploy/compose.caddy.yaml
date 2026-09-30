@@ -1,0 +1,28 @@
+# ONLY for a separate server whose ports 80/443 are free.
+# The current VPS should use deploy/nginx.conf and its existing HAProxy.
+services:
+  caddy:
+    image: caddy:2.11.4-alpine
+    profiles: ["standalone-https"]
+    restart: unless-stopped
+    depends_on:
+      drive:
+        condition: service_healthy
+    environment:
+      SOLODRIVE_DOMAIN: ${SOLODRIVE_DOMAIN:?Set SOLODRIVE_DOMAIN in .env}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+volumes:
+  caddy_data:
+  caddy_config:
