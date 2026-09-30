@@ -14,8 +14,8 @@
     "delete",
     "no browser errors"
   ],
-  "idle_rss_kib": 11408,
-  "peak_rss_kib": 11956,
-  "binary_bytes": 12374176,
+  "idle_rss_kib": 11356,
+  "peak_rss_kib": 14732,
+  "binary_bytes": 12398752,
   "large_file_note": "100 GiB offset verified by separate sparse-file Go test; real 50–100 GB transfer not performed"
 }

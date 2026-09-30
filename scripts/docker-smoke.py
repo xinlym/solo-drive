@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Isolated Docker integration test; requires Python 3, Docker, and Compose v2.
 
-Build the image first: docker build -t solo-drive:0.2.0 .
-Then run: python3 scripts/docker-smoke.py [--image solo-drive:0.2.0] [--port 18092]
+Build the image first: docker build -t solo-drive:0.3.0 .
+Then run: python3 scripts/docker-smoke.py [--image solo-drive:0.3.0] [--port 18092]
 The test binds localhost only and removes its own container, network, and volume.
 It never reads production credentials or modifies production data.
 """
@@ -12,7 +12,7 @@ import base64, concurrent.futures, hashlib, http.cookiejar, json, os, secrets, s
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--image', default='solo-drive:0.2.0')
+parser.add_argument('--image', default='solo-drive:0.3.0')
 parser.add_argument('--port', type=int, default=18092)
 args = parser.parse_args()
 if not 1024 <= args.port <= 65535:

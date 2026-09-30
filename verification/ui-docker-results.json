@@ -1,0 +1,35 @@
+{
+  "result": "PASS",
+  "image": {
+    "tag": "solo-drive:0.3.0",
+    "id": "sha256:4683d5f560d19aa9af9fc54cb945ea98f6393025923fc398ae2af970a8623594",
+    "size": "18.2MB",
+    "engine_reported_size_bytes": 5534830
+  },
+  "checks": {
+    "nonroot_readonly": true,
+    "home_and_share_page": true,
+    "private_api": true,
+    "login_and_storage": true,
+    "persistent_session": true,
+    "resume_after_container_recreate": true,
+    "sha256_upload_chunks": true,
+    "eight_parallel_ranges_sha256_match": true,
+    "revoke_and_delete": true,
+    "health": "healthy",
+    "transfer_size_bytes": 16777216,
+    "memory_after_transfer_sample": "3.773MiB / 384MiB",
+    "storage_fields": [
+      "total",
+      "used",
+      "available",
+      "reserve",
+      "upload_available",
+      "files_bytes",
+      "partial_bytes",
+      "pending_bytes"
+    ],
+    "temporary_resources_removed": true,
+    "cpu_after_transfer_percent": 3.17
+  }
+}
