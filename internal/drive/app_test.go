@@ -134,7 +134,8 @@ func TestAuthCSRFAndPrivateFiles(t *testing.T) {
 }
 func TestLoginOriginAndRateLimit(t *testing.T) {
 	a, s, _, _ := newTestApp(t)
-	badBody := "{\"username\":\"admin\",\"password\":\"wrong-password-value\"}"
+	clock := setLoginClockForTest(a)
+	badBody := `{"username":"admin","password":"wrong-password-value"}`
 	req, _ := http.NewRequest("POST", s.URL+"/api/login", strings.NewReader(badBody))
 	req.Header.Set("Origin", "https://evil.invalid")
 	res, err := http.DefaultClient.Do(req)
@@ -142,14 +143,17 @@ func TestLoginOriginAndRateLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	expectStatus(t, res, 403)
-	for i := 0; i < 10; i++ {
+	for range 5 {
+		clock.Advance(2 * time.Second)
 		expectStatus(t, requestTest(t, http.DefaultClient, "POST", s.URL+"/api/login", "", badBody), 401)
 	}
-	expectStatus(t, requestTest(t, http.DefaultClient, "POST", s.URL+"/api/login", "", badBody), 429)
-	a.loginMu.Lock()
-	clear(a.loginBuckets)
-	a.loginMu.Unlock()
+	res = requestTest(t, http.DefaultClient, "POST", s.URL+"/api/login", "", badBody)
+	if res.Header.Get("Retry-After") != "900" {
+		t.Fatalf("unexpected initial lockout: %s", res.Header.Get("Retry-After"))
+	}
+	expectStatus(t, res, 429)
 }
+
 func TestShareRangesRenameRevokeAndExpiry(t *testing.T) {
 	a, s, c, csrf := newTestApp(t)
 	data := bytes.Repeat([]byte("large-file-content-"), 4096)
@@ -334,9 +338,11 @@ func TestSPAEntryAndUnknownPaths(t *testing.T) {
 func TestLoginLimiterIsPerPeerAndTrustExplicit(t *testing.T) {
 	a, s, _, _ := newTestApp(t)
 	a.cfg.TrustedProxyCIDRs = "127.0.0.0/8"
-	a.loginMu.Lock()
-	a.loginBuckets = map[string]*loginBucket{"198.51.100.1": {window: time.Now(), blockedUntil: time.Now().Add(time.Minute)}}
-	a.loginMu.Unlock()
+	clock := setLoginClockForTest(a)
+	blocked := httptest.NewRequest("POST", s.URL+"/api/login", nil)
+	blocked.RemoteAddr = "127.0.0.1:1234"
+	blocked.Header.Set("X-Forwarded-For", "198.51.100.1")
+	failLoginAttempts(t, a.loginSecurity, clock, a.clientKey(blocked), 5)
 	body, _ := json.Marshal(map[string]string{"username": "admin", "password": testPassword})
 	request := func(ip string) *http.Response {
 		r, _ := http.NewRequest("POST", s.URL+"/api/login", bytes.NewReader(body))
@@ -348,11 +354,12 @@ func TestLoginLimiterIsPerPeerAndTrustExplicit(t *testing.T) {
 		return res
 	}
 	expectStatus(t, request("198.51.100.1"), 429)
+	clock.Advance(2 * time.Second)
 	expectStatus(t, request("198.51.100.2"), 200)
 	r := httptest.NewRequest("POST", "http://example.test", nil)
 	r.RemoteAddr = "203.0.113.5:1111"
 	r.Header.Set("X-Forwarded-For", "198.51.100.8")
-	if peer := a.loginPeer(r); peer != "203.0.113.5" {
+	if peer := a.clientIP(r).String(); peer != "203.0.113.5" {
 		t.Fatal("untrusted forwarded address accepted", peer)
 	}
 }

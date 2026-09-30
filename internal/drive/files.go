@@ -1,7 +1,9 @@
 package drive
 
 import (
+	"context"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"mime"
@@ -104,6 +106,10 @@ func (a *App) deleteFile(w http.ResponseWriter, r *http.Request) {
 		apiError(w, 404, "文件不存在或仍在上传")
 		return
 	}
+	if err = a.stopFileDownloads(r.Context(), id); err != nil {
+		apiError(w, 500, "删除未完成，请重试")
+		return
+	}
 	if err = a.removeFileData(id); err != nil {
 		slog.Error("delete file data", "id", id, "error", err)
 		apiError(w, 500, "删除未完成，请重试")
@@ -111,6 +117,34 @@ func (a *App) deleteFile(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, map[string]bool{"ok": true})
 }
+
+// Call only after the file is marked deleting. New shares/streams cannot be
+// admitted afterwards, so this snapshot includes every previously active share.
+func (a *App) stopFileDownloads(ctx context.Context, id string) error {
+	rows, err := a.db.QueryContext(ctx, "SELECT id FROM shares WHERE file_id=?", id)
+	if err != nil {
+		return err
+	}
+	var ids []string
+	for rows.Next() {
+		var shareID string
+		if err = rows.Scan(&shareID); err != nil {
+			rows.Close()
+			return err
+		}
+		ids = append(ids, shareID)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	for _, shareID := range ids {
+		a.downloads.RevokeShare(shareID)
+	}
+	return nil
+}
+
 func (a *App) removeFileData(id string) error {
 	if err := a.removeUploadFiles(id); err != nil {
 		return err
@@ -146,14 +180,27 @@ func (a *App) recoverDeletes() error {
 	return nil
 }
 func (a *App) ownerDownload(w http.ResponseWriter, r *http.Request) {
+	if !allowDownloadNavigation(w, r) {
+		return
+	}
+	if rejection := checkDownloadRange(r); rejection != nil {
+		rejection.Write(w)
+		return
+	}
 	f, err := a.getFile(r.PathValue("id"))
 	if err != nil {
 		apiError(w, 404, "文件不存在")
 		return
 	}
-	a.sendFile(w, r, f)
+	lease, rejection := a.downloads.Acquire(r.Context(), a.clientKey(r), "", true)
+	if rejection != nil {
+		rejection.Write(w)
+		return
+	}
+	defer lease.Release()
+	a.sendFile(w, r, f, lease)
 }
-func (a *App) sendFile(w http.ResponseWriter, r *http.Request, f File) {
+func (a *App) sendFile(w http.ResponseWriter, r *http.Request, f File, lease *downloadLease) {
 	file, err := os.Open(filepath.Join(a.uploadsDir, f.ID))
 	if err != nil {
 		apiError(w, 404, "文件不存在")
@@ -170,7 +217,9 @@ func (a *App) sendFile(w http.ResponseWriter, r *http.Request, f File) {
 	w.Header().Set("ETag", fmt.Sprintf("\"%s-%d\"", f.ID, f.Size))
 	w.Header().Set("Cache-Control", "private, no-store")
 	// Immutable content IDs make all Range requests refer to the same file version.
-	http.ServeContent(w, r, f.Name, info.ModTime(), file)
+	if err := lease.ServeContent(w, r, f.Name, info.ModTime(), file); err != nil {
+		panic(http.ErrAbortHandler)
+	}
 }
 func (a *App) createShare(w http.ResponseWriter, r *http.Request) {
 	var input struct {
@@ -193,9 +242,13 @@ func (a *App) createShare(w http.ResponseWriter, r *http.Request) {
 		expiry := time.Now().Add(time.Duration(input.ExpiresInHours) * time.Hour).UTC().Format(time.RFC3339)
 		s.ExpiresAt = &expiry
 	}
-	_, err = a.db.ExecContext(r.Context(), "INSERT INTO shares(id,file_id,created_at,expires_at) VALUES(?,?,?,?)", s.ID, s.FileID, s.CreatedAt, s.ExpiresAt)
+	result, err := a.db.ExecContext(r.Context(), "INSERT INTO shares(id,file_id,created_at,expires_at) SELECT ?,id,?,? FROM files WHERE id=? AND status='ready'", s.ID, s.CreatedAt, s.ExpiresAt, s.FileID)
 	if err != nil {
 		apiError(w, 500, "创建分享失败")
+		return
+	}
+	if n, _ := result.RowsAffected(); n == 0 {
+		apiError(w, 409, "文件已被删除或正在删除")
 		return
 	}
 	a.shareURLs(&s)
@@ -239,11 +292,15 @@ func (a *App) deleteShare(w http.ResponseWriter, r *http.Request) {
 		apiError(w, 404, "分享不存在")
 		return
 	}
+	a.downloads.RevokeShare(r.PathValue("id"))
 	writeJSON(w, 200, map[string]bool{"ok": true})
 }
 func (a *App) getShare(id string) (Share, error) {
 	var s Share
 	if len(id) != 48 {
+		return s, sql.ErrNoRows
+	}
+	if _, err := hex.DecodeString(id); err != nil {
 		return s, sql.ErrNoRows
 	}
 	err := a.db.QueryRow("SELECT s.id,s.file_id,f.name,f.size,s.created_at,s.expires_at FROM shares s JOIN files f ON s.file_id=f.id WHERE s.id=? AND f.status='ready'", id).Scan(&s.ID, &s.FileID, &s.FileName, &s.Size, &s.CreatedAt, &s.ExpiresAt)
@@ -268,10 +325,37 @@ func (a *App) publicShare(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"file_name": s.FileName, "size": s.Size, "expires_at": s.ExpiresAt, "download_url": s.DownloadURL})
 }
 func (a *App) sharedDownload(w http.ResponseWriter, r *http.Request) {
+	if !allowDownloadNavigation(w, r) {
+		return
+	}
+	if rejection := checkDownloadRange(r); rejection != nil {
+		rejection.Write(w)
+		return
+	}
 	s, err := a.getShare(r.PathValue("id"))
 	if err != nil {
 		apiError(w, 404, "分享不存在、已过期或已撤销")
 		return
 	}
-	a.sendFile(w, r, File{ID: s.FileID, Name: s.FileName, Size: s.Size, CreatedAt: s.CreatedAt})
+	ctx := r.Context()
+	if s.ExpiresAt != nil {
+		expiry, _ := time.Parse(time.RFC3339, *s.ExpiresAt)
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, expiry)
+		defer cancel()
+	}
+	lease, rejection := a.downloads.Acquire(ctx, a.clientKey(r), s.ID, false)
+	if rejection != nil {
+		rejection.Write(w)
+		return
+	}
+	defer lease.Release()
+	// Recheck after registering the stream: a concurrent revocation either
+	// fails this lookup or cancels this exact lease after its DB commit.
+	s, err = a.getShare(s.ID)
+	if err != nil {
+		apiError(w, 404, "分享不存在、已过期或已撤销")
+		return
+	}
+	a.sendFile(w, r, File{ID: s.FileID, Name: s.FileName, Size: s.Size, CreatedAt: s.CreatedAt}, lease)
 }

@@ -55,7 +55,7 @@ docker compose ps
 docker compose exec drive /solodrive healthcheck
 ```
 
-首次构建需要下载固定版本的基础镜像和依赖。镜像使用 Go `1.27.1`、Node.js `24.20.0` 构建；应用镜像标签为 `solo-drive:0.1.0`，不会自动拉取 `latest` 更新。
+首次构建需要下载固定版本的基础镜像和依赖。镜像使用 Go `1.27.1`、Node.js `24.20.0` 构建；应用镜像标签为 `solo-drive:0.2.0`，不会自动拉取 `latest` 更新。
 
 应用启动后还需要把专用域名接入现有 HTTPS 入口。`deploy/nginx.conf` 是监听 `127.0.0.1:8092` 的独立站点示例，`deploy/haproxy-snippet.cfg` 提供需要合并进现有 HTTPS frontend 的路由及独立 backend。将两个示例中的 `drive.example.com` 替换为实际域名，并确保现有 TLS 证书覆盖它。不要直接用示例覆盖整份 HAProxy 配置。
 
@@ -65,7 +65,7 @@ docker compose exec drive /solodrive healthcheck
 
 - Nginx：`client_max_body_size 0`、`proxy_request_buffering off`、`proxy_buffering off`，避免先把大文件缓存在另一份临时文件中。
 - 保留上传使用的 `POST/PATCH/HEAD/DELETE` 方法，保留下载的 `Range`、`If-Range` 和响应 `206/Content-Range`。不要将 Range 请求改写成完整文件响应。
-- 示例中读写空闲超时为一小时，表示两次 I/O 之间的允许空闲时间，不是整个文件必须在一小时内完成。HAProxy 的对应空闲超时也要按现有 frontend 检查。
+- Nginx 示例的客户端上传读取空闲超时为 300 秒，向客户端下载发送空闲超时为 120 秒；Nginx 与应用之间的读写空闲超时为一小时。应用下载使用 30 秒滑动写入超时，客户端或代理持续不接收数据时会中断连接。HAProxy backend 的响应空闲超时为一小时，现有 frontend 的客户端空闲超时需另外检查。这些是各连接阶段等待 I/O 的上限，不是文件总传输时长限制；只要数据持续传输，大文件可以超过一小时，断开后可续传。
 - HAProxy 必须覆盖来自公网的 `X-Forwarded-For`，Nginx 只信任回环上的 HAProxy，再向应用写入确定的 HTTPS 和 Host 信息。不要信任任意客户端提供的转发头。应用分享链接使用显式配置的 `SOLODRIVE_PUBLIC_URL`。
 - 分享路径中的随机令牌相当于访问凭证。示例 Nginx 关闭 access log；已有 HAProxy/CDN 日志也应避免保存完整分享 URL。
 - 上传下载域名建议 DNS 直连这台服务器；如果使用 CDN 或其他中间代理，需要单独核实其请求体大小、空闲超时和下载政策，应用无法消除中间代理限制。
@@ -94,7 +94,7 @@ docker compose -f compose.yaml -f deploy/compose.caddy.yaml --profile standalone
 
 服务器支持 `GET`、`HEAD`、`Range`、`If-Range` 和文件 ETag，多连接下载由下载器发起；推荐从每文件 4 个连接开始，根据实际线路调整。没有下载次数或速度配额。多个接收者会共享 VPS 总带宽，服务商月流量、磁盘容量和链路速度仍是实际边界。
 
-撤销或到期在每次新的下载请求时检查，**不会强制切断已经开始的响应**。已经建立的单次下载或 Range 请求可能继续完成；后续请求会被拒绝。
+撤销分享、删除文件或分享到期会取消正在传输的公开下载，并拒绝后续请求。已经发送到系统和代理缓冲区的少量数据可能继续到达接收者。
 
 ## 容量和超大文件
 
@@ -112,6 +112,18 @@ docker compose -f compose.yaml -f deploy/compose.caddy.yaml --profile standalone
 
 例如，40 GiB 的系统盘不能直接存放 50–100 GB 的单文件。要达到该目标，需要先扩容或挂载足够大的数据盘，并把整个数据目录迁移过去。**50–100 GB 文件以及弱网长时间传输仍需在目标存储和真实线路上验收，不能以小文件测试替代。**
 
+## 防暴力破解与下载滥用
+
+登录在 15 分钟内失败 5 次后，对该来源封禁 15 分钟；重复触发会递增，最长 24 小时。尝试计数和封禁保存在 SQLite，重启不会清空。同一 IPv6 /64 网段共用额度。不同来源不共享账号级封禁；全局每 2 秒补充一次密码验证额度、突发 5 次，最多同时进行 2 次验证，降低分布式尝试对 CPU 的占用。
+
+通用请求默认每来源 600 次/分钟、突发 60 次。每来源公开下载最多 16 个并发请求，每条分享最多 32 个，公开下载总量最多 48 个；管理端有独立的 16 个下载槽。分享的下载请求跨 IP 共用每秒 1 次、突发 32 次的额度。这里限制的是请求发起频率和并发数量，不限制单个文件大小、文件总传输时长或每秒传输字节数；通常的 8 连接下载仍可使用。超限返回 429 和 Retry-After，下载器应等待后重试。
+
+每个 HTTP 请求只接受一个 Range 区间；下载器可用多个独立请求并行下载。单请求多段 Range、重复 Range 头或超长 Range 会被拒绝。传输使用有界缓冲及 30 秒滑动写入超时；停止读取数据的客户端不能无限占住连接。跨站图片/脚本嵌入下载受到限制，通过分享页面导航或普通下载器仍可下载。
+
+Nginx 示例另外设置独立的请求频率和连接限制；大文件仍流式转发，上传读取空闲上限 300 秒、向客户端发送空闲上限 120 秒，超时后可继续断点续传。已有代理需要同步应用新版示例；这些限制仅作用于网盘虚拟主机。运行状态表有容量上限，达到上限时拒绝新增来源，不会通过驱逐仍有效的封禁来重置限制。
+
+**保持不限总流量时，无法完全阻止有效分享链接被低频、持续或分布式重复下载。** 发现滥用时可以在管理端撤销该分享，正在传输的流也会被中止。要对总费用给出硬上限，需要另外配置按字节累计的流量额度或服务商流量保护。应用和反向代理限流不能替代服务商提供的网络层 DDoS 防护。
+
 ## 配置
 
 | 环境变量 | 默认值 / 作用 |
@@ -125,10 +137,15 @@ docker compose -f compose.yaml -f deploy/compose.caddy.yaml --profile standalone
 | `SOLODRIVE_COOKIE_SECURE` | `true`；只有回环 HTTP 本地测试时设为 `false` |
 | `SOLODRIVE_TRUSTED_PROXY_CIDRS` | 裸机默认仅信任回环代理；Compose 加入 Docker 默认私网 172.16.0.0/12，自定义网络时改为实际代理来源 CIDR |
 | `SOLODRIVE_SESSION_HOURS` | `168`，登录会话有效期（小时） |
+| SOLODRIVE_REQUESTS_PER_MINUTE | 600，每来源每分钟请求数 |
+| SOLODRIVE_REQUEST_BURST | 60，允许的短时请求突发量 |
+| SOLODRIVE_DOWNLOADS_PER_IP | 16，每来源下载并发数；IPv6 按 /64 |
+| SOLODRIVE_PUBLIC_DOWNLOADS | 48，所有公开下载的并发数 |
+| SOLODRIVE_DOWNLOADS_PER_SHARE | 32，每条分享的下载并发数 |
 
 `.env` 由 Docker Compose 读取；裸机二进制不会自动加载它。上传内容、续传信息和 SQLite 数据均需放在可写且持久化的 `SOLODRIVE_DATA_DIR`。同一个数据目录仅运行一个应用进程。
 
-登录失败按来源地址限流；只有来自配置的可信代理时才读取其转发地址。若修改网络结构，需同步收窄/更新可信代理 CIDR，并确保代理覆盖客户端伪造的转发头。
+登录失败按 IPv4 地址或 IPv6 /64 网段限制；只有来自配置的可信代理时才读取其转发地址。若修改网络结构，需同步收窄/更新可信代理 CIDR，并确保代理覆盖客户端伪造的转发头。
 
 管理端使用 HttpOnly、SameSite=Strict 的会话 cookie，生产启用 Secure；管理写操作受 CSRF 检查保护。账号密码启动时读取并通过 bcrypt 哈希保存。更换密码文件内容或管理用户名后重新启动应用，会撤销旧登录会话；既有分享链接保持原状态。
 
@@ -159,13 +176,13 @@ make check
 
 ## 已完成的验证
 
-本次实现通过了 25 个 Go 测试、Go race 并发竞争检查、静态检查以及前端 TypeScript 检查和构建。覆盖续传偏移、重启恢复、分块摘要失败回滚、空间预留、CSRF、分享到期与撤销、八连接 Range 下载内容一致性等行为。
+本次实现通过了 53 个 Go 测试、Go race 并发竞争检查、静态检查以及前端 TypeScript 检查和构建。覆盖续传偏移、重启恢复、分块摘要失败回滚、空间预留、CSRF、分享到期与撤销、八连接 Range 下载内容一致性等行为。
 
 浏览器端实际上传 20 MiB 文件，暂停后刷新页面，再选择原文件续传；下载结果与原文件的 SHA-256 一致。桌面和手机页面均已检查，截图及结果见 [verification](verification/)。
 
-该浏览器测试中，独立进程空闲 RSS 约 11 MiB，采样峰值约 14 MiB；Linux amd64 可执行程序约 12.3 MB。这是小规模测试的观测值，不代表生产资源上限或几十 GB 传输的性能保证。100 GiB 文件偏移由稀疏文件测试验证，尚未完成 50–100 GB 全量实传。
+该浏览器测试中，独立进程空闲 RSS 约 11 MiB，采样峰值约 12 MiB；Linux amd64 可执行程序约 12.4 MB。这是小规模测试的观测值，不代表生产资源上限或几十 GB 传输的性能保证。100 GiB 文件偏移由稀疏文件测试验证，尚未完成 50–100 GB 全量实传。
 
-Docker 镜像约 18.1 MB，16 MiB 容器端到端测试已通过；容器重建后可继续上传，八连接下载重组后的 SHA-256 与原文件一致。详情见 [容器验证记录](verification/docker-results.json)。
+Docker 镜像约 18.2 MB，16 MiB 容器端到端测试已通过；容器重建后可继续上传，八连接下载重组后的 SHA-256 与原文件一致。详情见 [防护版本容器验证记录](verification/security-docker-results.json)。
 
 容器端到端测试脚本可在构建镜像后重复运行：
 

@@ -412,13 +412,20 @@ func (u *durableUpload) FinishUpload(ctx context.Context) error {
 }
 func (u *durableUpload) Terminate(ctx context.Context) error {
 	a := u.store.app
-	if _, err := a.db.ExecContext(ctx, "UPDATE files SET status='deleting' WHERE id=?", u.id); err != nil {
+	result, err := a.db.ExecContext(ctx, "UPDATE files SET status='deleting' WHERE id=? AND status IN ('uploading','deleting')", u.id)
+	if err != nil {
+		return err
+	}
+	if n, _ := result.RowsAffected(); n == 0 {
+		return handler.NewError("ERR_UPLOAD_COMPLETED", "delete completed files through the file management API", 409)
+	}
+	if err := a.stopFileDownloads(ctx, u.id); err != nil {
 		return err
 	}
 	if err := a.removeUploadFiles(u.id); err != nil {
 		return err
 	}
-	_, err := a.db.ExecContext(ctx, "DELETE FROM files WHERE id=?", u.id)
+	_, err = a.db.ExecContext(ctx, "DELETE FROM files WHERE id=?", u.id)
 	return err
 }
 

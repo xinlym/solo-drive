@@ -11,19 +11,40 @@ import (
 )
 
 type Config struct {
-	TrustedProxyCIDRs string
-	Addr              string
-	DataDir           string
-	PublicURL         string
-	AdminUser         string
-	AdminPassword     string
-	ReserveBytes      int64
-	CookieSecure      bool
-	SessionHours      int
+	RequestsPerMinute    int
+	RequestBurst         int
+	MaxDownloadsPerIP    int
+	MaxPublicDownloads   int
+	MaxDownloadsPerShare int
+	TrustedProxyCIDRs    string
+	Addr                 string
+	DataDir              string
+	PublicURL            string
+	AdminUser            string
+	AdminPassword        string
+	ReserveBytes         int64
+	CookieSecure         bool
+	SessionHours         int
 }
 
 func ConfigFromEnv() (Config, error) {
 	c := Config{Addr: env("SOLODRIVE_ADDR", "127.0.0.1:8091"), DataDir: env("SOLODRIVE_DATA_DIR", "./data"), PublicURL: strings.TrimRight(os.Getenv("SOLODRIVE_PUBLIC_URL"), "/"), AdminUser: env("SOLODRIVE_ADMIN_USER", "admin"), ReserveBytes: 5 << 30, CookieSecure: true, SessionHours: 168}
+	c = securityDefaults(c)
+	for key, target := range map[string]*int{
+		"SOLODRIVE_REQUESTS_PER_MINUTE": &c.RequestsPerMinute,
+		"SOLODRIVE_REQUEST_BURST":       &c.RequestBurst,
+		"SOLODRIVE_DOWNLOADS_PER_IP":    &c.MaxDownloadsPerIP,
+		"SOLODRIVE_PUBLIC_DOWNLOADS":    &c.MaxPublicDownloads,
+		"SOLODRIVE_DOWNLOADS_PER_SHARE": &c.MaxDownloadsPerShare,
+	} {
+		if value := os.Getenv(key); value != "" {
+			n, err := strconv.Atoi(value)
+			if err != nil || n < 1 {
+				return c, fmt.Errorf("%s must be a positive integer", key)
+			}
+			*target = n
+		}
+	}
 	var err error
 	if v := os.Getenv("SOLODRIVE_RESERVE_BYTES"); v != "" {
 		c.ReserveBytes, err = strconv.ParseInt(v, 10, 64)
@@ -56,6 +77,10 @@ func ConfigFromEnv() (Config, error) {
 	return c, validateConfig(c)
 }
 func validateConfig(c Config) error {
+	c = securityDefaults(c)
+	if c.RequestsPerMinute < 1 || c.RequestsPerMinute > 60000 || c.RequestBurst < 1 || c.RequestBurst > 10000 || c.MaxDownloadsPerIP < 1 || c.MaxDownloadsPerIP > 256 || c.MaxPublicDownloads < 1 || c.MaxPublicDownloads > 512 || c.MaxDownloadsPerShare < 1 || c.MaxDownloadsPerShare > 256 {
+		return errors.New("invalid request or download protection limits")
+	}
 	for _, cidr := range strings.Split(c.TrustedProxyCIDRs, ",") {
 		if strings.TrimSpace(cidr) == "" {
 			continue
@@ -92,4 +117,23 @@ func env(k, def string) string {
 		return s
 	}
 	return def
+}
+
+func securityDefaults(c Config) Config {
+	if c.RequestsPerMinute == 0 {
+		c.RequestsPerMinute = 600
+	}
+	if c.RequestBurst == 0 {
+		c.RequestBurst = 60
+	}
+	if c.MaxDownloadsPerIP == 0 {
+		c.MaxDownloadsPerIP = 16
+	}
+	if c.MaxPublicDownloads == 0 {
+		c.MaxPublicDownloads = 48
+	}
+	if c.MaxDownloadsPerShare == 0 {
+		c.MaxDownloadsPerShare = 32
+	}
+	return c
 }

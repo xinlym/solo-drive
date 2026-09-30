@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -71,9 +70,15 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 		apiError(w, 403, "不允许跨站登录")
 		return
 	}
+	attempt := a.admitLogin(w, r)
+	if attempt == nil {
+		return
+	}
+	defer attempt.finish(false)
+	// readJSON applies the shared small-body size limit and 15-second deadline.
 	var input struct {
-		Username string "json:\"username\""
-		Password string "json:\"password\""
+		Username string `json:"username"`
+		Password string `json:"password"`
 	}
 	if !readJSON(w, r, &input) {
 		return
@@ -82,61 +87,16 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 		apiError(w, 401, "用户名或密码错误")
 		return
 	}
-	now := time.Now()
-	peer := a.loginPeer(r)
-	a.loginMu.Lock()
-	if a.loginBuckets == nil {
-		a.loginBuckets = make(map[string]*loginBucket)
-	}
-	bucket := a.loginBuckets[peer]
-	if bucket == nil {
-		if len(a.loginBuckets) >= 2048 {
-			var oldestKey string
-			oldest := now
-			for key, b := range a.loginBuckets {
-				if b.window.Before(oldest) {
-					oldest = b.window
-					oldestKey = key
-				}
-			}
-			delete(a.loginBuckets, oldestKey)
-		}
-		bucket = &loginBucket{window: now}
-		a.loginBuckets[peer] = bucket
-	}
-	blocked := now.Before(bucket.blockedUntil)
-	if now.Sub(bucket.window) > time.Minute {
-		bucket.window = now
-		bucket.failures = 0
-	}
-	a.loginMu.Unlock()
-	if blocked {
-		w.Header().Set("Retry-After", "60")
-		apiError(w, 429, "尝试次数过多，请稍后再试")
-		return
-	}
-	select {
-	case a.loginSlot <- struct{}{}:
-		defer func() { <-a.loginSlot }()
-	default:
-		w.Header().Set("Retry-After", "2")
-		apiError(w, 429, "登录繁忙，请稍后重试")
-		return
-	}
 	passwordOK := bcrypt.CompareHashAndPassword(a.passwordHash, []byte(input.Password)) == nil
 	if !passwordOK || subtle.ConstantTimeCompare([]byte(input.Username), []byte(a.cfg.AdminUser)) != 1 {
-		a.loginMu.Lock()
-		bucket.failures++
-		if bucket.failures >= 10 {
-			bucket.blockedUntil = now.Add(time.Minute)
-		}
-		a.loginMu.Unlock()
 		apiError(w, 401, "用户名或密码错误")
 		return
 	}
-	a.loginMu.Lock()
-	delete(a.loginBuckets, peer)
-	a.loginMu.Unlock()
+	if err := attempt.finish(true); err != nil {
+		apiError(w, 503, "登录防护暂不可用，请稍后重试")
+		return
+	}
+	now := time.Now()
 	token := randomHex(32)
 	csrf := randomHex(32)
 	expires := now.Add(time.Duration(a.cfg.SessionHours) * time.Hour)
@@ -173,30 +133,4 @@ func (a *App) logout(w http.ResponseWriter, r *http.Request) {
 	}
 	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: "", Path: "/", HttpOnly: true, Secure: a.cfg.CookieSecure, SameSite: http.SameSiteStrictMode, MaxAge: -1})
 	writeJSON(w, 200, map[string]bool{"ok": true})
-}
-
-type loginBucket struct {
-	failures     int
-	window       time.Time
-	blockedUntil time.Time
-}
-
-func (a *App) loginPeer(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
-	}
-	ip := net.ParseIP(host)
-	for _, cidr := range strings.Split(a.cfg.TrustedProxyCIDRs, ",") {
-		_, network, err := net.ParseCIDR(strings.TrimSpace(cidr))
-		if err != nil || !network.Contains(ip) {
-			continue
-		}
-		// The bundled proxies replace untrusted incoming forwarding headers.
-		forwarded := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
-		if client := net.ParseIP(strings.TrimSpace(forwarded[len(forwarded)-1])); client != nil {
-			return client.String()
-		}
-	}
-	return host
 }

@@ -27,21 +27,22 @@ import (
 )
 
 type App struct {
-	cfg          Config
-	db           *sql.DB
-	uploadsDir   string
-	uploadMu     sync.Mutex
-	uploader     *handler.Handler
-	passwordHash []byte
-	authEpoch    string
-	lockFile     *os.File
-	loginMu      sync.Mutex
-	loginBuckets map[string]*loginBucket
-	loginSlot    chan struct{}
-	staticFS     fs.FS
+	cfg           Config
+	db            *sql.DB
+	uploadsDir    string
+	uploadMu      sync.Mutex
+	uploader      *handler.Handler
+	passwordHash  []byte
+	authEpoch     string
+	lockFile      *os.File
+	loginSecurity *loginSecurity
+	downloads     *downloadGuard
+	requests      *requestGuard
+	staticFS      fs.FS
 }
 
 func New(cfg Config) (*App, error) {
+	cfg = securityDefaults(cfg)
 	if err := validateConfig(cfg); err != nil {
 		return nil, err
 	}
@@ -53,7 +54,9 @@ func New(cfg Config) (*App, error) {
 	if err = os.MkdirAll(abs, 0700); err != nil {
 		return nil, err
 	}
-	a := &App{cfg: cfg, uploadsDir: filepath.Join(abs, "uploads"), loginSlot: make(chan struct{}, 2)}
+	a := &App{cfg: cfg, uploadsDir: filepath.Join(abs, "uploads")}
+	a.requests = newRequestGuard(cfg.RequestsPerMinute, cfg.RequestBurst)
+	a.downloads = newDownloadGuard(downloadPolicy{MaxPublic: cfg.MaxPublicDownloads, MaxPerIP: cfg.MaxDownloadsPerIP, MaxPerShare: cfg.MaxDownloadsPerShare})
 	if a.lockFile, err = acquireLock(filepath.Join(abs, ".lock")); err != nil {
 		return nil, err
 	}
@@ -83,6 +86,9 @@ func New(cfg Config) (*App, error) {
 		}
 	}
 	if err = a.initPassword(); err != nil {
+		return fail(err)
+	}
+	if err = a.initLoginSecurity(); err != nil {
 		return fail(err)
 	}
 	if err = a.initUploads(); err != nil {
@@ -191,17 +197,29 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) { apiError(w, 404, "接口不存在") })
 	mux.HandleFunc("/", a.static)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		trackedBody := trackRequestBody(r)
+		defer closeRequestBody(w, r, trackedBody)
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
 		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		if a.cfg.CookieSecure {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000")
+		}
 		defer func() {
 			if err := recover(); err != nil {
+				if err == http.ErrAbortHandler {
+					panic(err)
+				}
 				slog.Error("request panic", "error", fmt.Sprint(err))
 				apiError(w, 500, "服务器内部错误")
 			}
 		}()
+		if !a.allowRequest(w, r) {
+			return
+		}
 		mux.ServeHTTP(w, r)
 	})
 }
@@ -256,6 +274,9 @@ func apiError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
+	controller := http.NewResponseController(w)
+	_ = controller.SetReadDeadline(time.Now().Add(15 * time.Second))
+	defer controller.SetReadDeadline(time.Time{})
 	r.Body = http.MaxBytesReader(w, r.Body, 16384)
 	d := json.NewDecoder(r.Body)
 	d.DisallowUnknownFields()

@@ -43,7 +43,11 @@ func uploadTestApp(t *testing.T, dir string) *App {
 		db.Close()
 		t.Fatal(err)
 	}
-	a := &App{cfg: Config{DataDir: dir, ReserveBytes: 0}, db: db, uploadsDir: up}
+	if _, err := db.Exec("CREATE TABLE IF NOT EXISTS shares(id TEXT PRIMARY KEY,file_id TEXT NOT NULL)"); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	a := &App{cfg: Config{DataDir: dir, ReserveBytes: 0}, db: db, uploadsDir: up, downloads: newDownloadGuard(downloadPolicy{})}
 	if err := a.initUploads(); err != nil {
 		db.Close()
 		t.Fatal(err)
@@ -595,5 +599,23 @@ func TestUploadChecksumCrashCannotPublishUncheckedFinalChunk(t *testing.T) {
 	}
 	if w := checksumPatch(t, b, loc, 3, "def", checksumHeader("sha256", "def")); w.Code != 204 {
 		t.Fatalf("crash retry: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestUploadCompletedFileCannotBypassManagedDeletion(t *testing.T) {
+	a := uploadTestApp(t, "")
+	loc := tusCreate(t, a, 4, "protected.bin")
+	if w := tusPatch(t, a, loc, 0, "safe"); w.Code != 204 {
+		t.Fatal(w.Code)
+	}
+	if w := tusRequest(t, a, "DELETE", loc, nil, nil); w.Code != 409 {
+		t.Fatalf("completed tus deletion should require file management: %d %s", w.Code, w.Body.String())
+	}
+	if got := uploadStatus(t, a, uploadID(loc)); got != "ready" {
+		t.Fatal("completed file was removed", got)
+	}
+	data, err := os.ReadFile(filepath.Join(a.uploadsDir, uploadID(loc)))
+	if err != nil || string(data) != "safe" {
+		t.Fatal("completed content removed", err)
 	}
 }

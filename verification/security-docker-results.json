@@ -1,0 +1,49 @@
+{
+  "result": "PASS",
+  "image": {
+    "tag": "solo-drive:0.2.0",
+    "id": "sha256:b80be7ea97aeb6c3b455a9fb85e8bd0190c89829bc4270529a013ace05d71a5b",
+    "size": "18.2MB",
+    "engine_reported_size_bytes": 5529137
+  },
+  "checks": {
+    "nonroot_readonly": true,
+    "home_and_share_page": true,
+    "private_api": true,
+    "login_and_storage": true,
+    "persistent_session": true,
+    "resume_after_container_recreate": true,
+    "sha256_upload_chunks": true,
+    "eight_parallel_ranges_sha256_match": true,
+    "revoke_and_delete": true,
+    "health": "healthy",
+    "transfer_size_bytes": 16777216,
+    "memory_after_transfer_sample": "3.746 MiB / 384 MiB",
+    "cpu_after_transfer_percent": 3.14,
+    "storage_fields": [
+      "total",
+      "used",
+      "available",
+      "reserve",
+      "upload_available",
+      "files_bytes",
+      "partial_bytes",
+      "pending_bytes"
+    ],
+    "temporary_resources_removed": true,
+    "race_detector": {
+      "result": "PASS",
+      "command": "go test -race -p 1 ./internal/drive",
+      "top_level_tests": 53,
+      "test_duration_seconds": 30.104,
+      "source_mount": "read_only",
+      "network": "none",
+      "memory_limit_mib": 900,
+      "cpu_limit": 1,
+      "exit_code": 0,
+      "oom_killed": false,
+      "final_tcp_reuse_test_included": true
+    },
+    "final_backend_builder": true
+  }
+}
